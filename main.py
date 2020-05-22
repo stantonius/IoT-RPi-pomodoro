@@ -54,7 +54,7 @@ mqtt_bridge_hostname = 'mqtt.googleapis.com'
 mqtt_bridge_port = 8883
 message_type = 'event' 
 
-token_refresh_frequency = 60
+token_refresh_frequency = 2
 
 # IoT Config
 def create_jwt(project_id, private_key_file, algorithm):
@@ -104,15 +104,18 @@ class Pomodoro:
     def message(self, msg:str, sec:int=None):
         self.lcd.message = msg
         if sec:
-            self.backlight_switch(sec)
+            self.backlight_switch("on", sec)
             time.sleep(sec)
             self.clear()
 
-    def backlight_switch(self, on_time=None):
-        self.lcd.backlight = not self.lcd.backlight
+    def backlight_switch(self, state="off", on_time=None):
+        if state == "on":
+            self.lcd.backlight = True
         if on_time:
             time.sleep(on_time)
-            self.lcd.backlight = not self.lcd.backlight
+            self.lcd.backlight = False
+        if state == "off":
+            self.lcd.backlight = False
 
     def clear(self):
         self.lcd.clear()
@@ -148,9 +151,7 @@ class Pomodoro:
         # Callback on connection.
         print('Connection Result:', error_str(rc))
         self.connected = True
-        self.backlight_switch()
         self.message('Connected bitch', 3)
-        self.backlight_switch()
 
     def on_disconnect(self, unused_client, unused_userdata, rc):
         # Callback on disconnect.
@@ -180,11 +181,12 @@ class Pomodoro:
         # ENTER THINGS TO DO HERE DEPENDING ON DATA
         if data['status'] == 'active':
             self.state = 'active'
+            self.duration = data['duration']
+            self.end_time = arrow.utcnow().shift(minutes=self.duration)
+            self.active_pomo = True
+        if data['status'] == 'paused':
+            self.state = 'paused'
 
-        self.backlight_switch()
-        self.duration = data['duration']
-        self.end_time = arrow.utcnow().shift(minutes=self.duration)
-        self.active_pomo = True
 
 
 
@@ -199,11 +201,20 @@ def main():
                     cloud_region,
                     registry_id,
                     device_id))
+
+    device = Pomodoro()
+
+
     
     try:
         while True:
+            
+            device.clear()
+            
             if client:
+                ## Add in here to say if reset and pomodoro in progress, capture the inprogress status here 
                 client.disconnect()
+                
             client = mqtt.Client(
                 client_id='projects/{}/locations/{}/registries/{}/devices/{}'.format(
                     project_id,
@@ -219,8 +230,6 @@ def main():
             client.tls_set(ca_certs=ca_certs, tls_version=ssl.PROTOCOL_TLSv1_2)
 
             jwt_refresh = arrow.utcnow().shift(minutes=token_refresh_frequency-1)
-
-            device = Pomodoro()
 
             client.on_connect = device.on_connect
             client.on_publish = device.on_publish
@@ -242,6 +251,10 @@ def main():
             client.loop_start()
             
             num_message = 0 
+
+            print("Device end time", device.end_time)
+            print('Active pomo', device.active_pomo)
+            print('State', device.state)
             
             while arrow.utcnow() < jwt_refresh:     #refresh token 1 min before expiration
                 # ALL ACTIONS RECEIVED OR PERFORMED UNDER HERE  
@@ -262,22 +275,27 @@ def main():
                     payload = json.dumps(data, indent=4)
                     print('Publishing payload', payload)
                     client.publish(mqtt_telemetry_topic, payload, qos=1)
+                    buzzer.beep(0.1, 0.1, 1)
                     # Make sure that message was sent once on press.
                 if button.is_pressed and not device.active_pomo:
                     device.message('Start pomo with \nGoogle assistant', 10)
+
                 if device.active_pomo and device.state == 'active':
+                    device.backlight_switch("on")
                     if (device.end_time - arrow.utcnow()).seconds > 0:
+                        device.clear()
                         minutes, seconds = divmod((device.end_time - arrow.utcnow()).seconds, 60)
                         device.lcd.message = f"{minutes} mins {seconds} secs"
-                        continue
                     else:
                         buzzer.beep(0.1, 0.1, 1)
                         device.active_pomo = False
                         device.state == 'complete'
-                    continue
+                        device.message("Pomo done", 10)
+                if device.active_pomo and device.state == 'paused':
+                    buzzer.beep(0.1, 0.1, 1)
+                    device.active_pomo = False
+                    device.message('Paused pomo', 10)
                 time.sleep(1)
-                device.clear()
-
 
     except KeyboardInterrupt:
         # Exit script on ^C.
